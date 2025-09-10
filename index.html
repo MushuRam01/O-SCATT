@@ -1,4 +1,4 @@
-<!-- index.html (UPDATED for Mask Streaming) -->
+<!-- index.html (FINAL VERSION with Target Simulation) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -9,11 +9,16 @@
         #main-container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; align-items: flex-start; }
         .video-box { background-color: #000; border-radius: 8px; }
         #video { display: none; }
-        #controls { background-color: #34495e; padding: 20px; border-radius: 8px; width: 300px; }
+        #controls, #actions { background-color: #34495e; padding: 20px; border-radius: 8px; width: 300px; }
         .slider-group { margin-bottom: 10px; }
         .slider-group label { display: block; margin-bottom: 5px; }
         input[type="range"] { width: 100%; }
-        h3 { margin-top: 0; }
+        h3 { margin-top: 0; text-align: center; }
+        button { background-color: #3498db; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; width: 100%; margin-top: 10px; }
+        button:hover { background-color: #2980b9; }
+        button:disabled { background-color: #555; cursor: not-allowed; }
+        #targetCanvas { background-color: #f0f0f0; border: 2px solid #333; cursor: crosshair; }
+        #target-container { text-align: center; }
     </style>
 </head>
 <body>
@@ -21,107 +26,277 @@
     <div id="status" style="margin-bottom: 20px;">Connecting to server...</div>
     
     <div id="main-container">
+        <!-- Live Feed & Mask -->
         <div>
             <h3>Live Feed</h3>
             <canvas id="videoCanvas" class="video-box" width="640" height="480"></canvas>
             <video id="video" width="640" height="480" autoplay></video>
         </div>
-
-        <div id="controls">
-            <h3>HSV Calibration</h3>
-            <!-- Sliders are unchanged -->
-            <div class="slider-group"><label for="lh">Lower Hue (L-H): <span id="lh-val">5</span></label><input type="range" id="lh" min="0" max="179" value="5"></div>
-            <div class="slider-group"><label for="ls">Lower Saturation (L-S): <span id="ls-val">150</span></label><input type="range" id="ls" min="0" max="255" value="150"></div>
-            <div class="slider-group"><label for="lv">Lower Value (L-V): <span id="lv-val">150</span></label><input type="range" id="lv" min="0" max="255" value="150"></div>
-            <hr style="border-color: #555; margin: 20px 0;">
-            <div class="slider-group"><label for="uh">Upper Hue (U-H): <span id="uh-val">15</span></label><input type="range" id="uh" min="0" max="179" value="15"></div>
-            <div class="slider-group"><label for="us">Upper Saturation (U-S): <span id="us-val">255</span></label><input type="range" id="us" min="0" max="255" value="255"></div>
-            <div class="slider-group"><label for="uv">Upper Value (U-V): <span id="uv-val">255</span></label><input type="range" id="uv" min="0" max="255" value="255"></div>
-        </div>
-        
-        <!-- NEW: Canvas to display the mask -->
         <div>
             <h3>Live Mask</h3>
             <canvas id="maskCanvas" class="video-box" width="320" height="240"></canvas>
         </div>
+
+        <!-- Target Simulation -->
+        <div id="target-container">
+            <h3>Simulated Target</h3>
+            <canvas id="targetCanvas" width="500" height="500"></canvas>
+        </div>
+        
+        <!-- Controls & Actions -->
+        <div>
+            <div id="controls">
+                <h3>HSV Calibration</h3>
+                <!-- Sliders are unchanged -->
+                <div class="slider-group"><label>L-H: <span id="lh-val">5</span></label><input type="range" id="lh" min="0" max="179" value="5"></div>
+                <div class="slider-group"><label>L-S: <span id="ls-val">150</span></label><input type="range" id="ls" min="0" max="255" value="150"></div>
+                <div class="slider-group"><label>L-V: <span id="lv-val">150</span></label><input type="range" id="lv" min="0" max="255" value="150"></div>
+                <hr style="border-color: #555; margin: 15px 0;">
+                <div class="slider-group"><label>U-H: <span id="uh-val">15</span></label><input type="range" id="uh" min="0" max="179" value="15"></div>
+                <div class="slider-group"><label>U-S: <span id="us-val">255</span></label><input type="range" id="us" min="0" max="255" value="255"></div>
+                <div class="slider-group"><label>U-V: <span id="uv-val">255</span></label><input type="range" id="uv" min="0" max="255" value="255"></div>
+            </div>
+            <div id="actions">
+                 <h3>Actions</h3>
+                 <button id="calibrateScaleButton">Calibrate Scale</button>
+                 <button id="setCenterButton" disabled>Set Aim Center</button>
+            </div>
+        </div>
     </div>
 
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-
     <script>
-        // --- Setup ---
+        // --- Setup: DOM Elements ---
         const video = document.getElementById('video');
-        const canvas = document.getElementById('videoCanvas');
-        const ctx = canvas.getContext('2d');
-        const statusDiv = document.getElementById('status');
-        
-        // NEW: Setup for the mask display
+        const videoCanvas = document.getElementById('videoCanvas');
+        const videoCtx = videoCanvas.getContext('2d');
         const maskCanvas = document.getElementById('maskCanvas');
         const maskCtx = maskCanvas.getContext('2d');
-        const maskImage = new Image();
+        const targetCanvas = document.getElementById('targetCanvas');
+        const targetCtx = targetCanvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        const setCenterButton = document.getElementById('setCenterButton');
+        const calibrateScaleButton = document.getElementById('calibrateScaleButton');
 
+        // --- State Variables ---
         let lastTrackedPoint = null;
+        let pixelsPerMm = null; // Our crucial calibration ratio
+        let centerPoint = null; // The (x,y) of the sticker when user "zeros" their aim
+        let isCalibratingScale = false;
+        let calibPoints = [];
+        let traceHistory = []; // Stores magnified points for the trace
+        let audioContext, microphone, analyser;
+        let lastShotTime = 0;
 
-        // Setup for sliders (unchanged)
+        // --- Constants ---
+        const MAGNIFICATION = 10; // 10m target / 1m camera distance
+        const TARGET_DIAMETER_MM = 200; // Let's say our canvas represents a 20cm diameter on the target
+        
+        // --- Setup: Sliders & Mask Image ---
+        const maskImage = new Image();
         const sliders = { lh: document.getElementById('lh'), ls: document.getElementById('ls'), lv: document.getElementById('lv'), uh: document.getElementById('uh'), us: document.getElementById('us'), uv: document.getElementById('uv'), };
         const sliderVals = { lh: document.getElementById('lh-val'), ls: document.getElementById('ls-val'), lv: document.getElementById('lv-val'), uh: document.getElementById('uh-val'), us: document.getElementById('us-val'), uv: document.getElementById('uv-val'), };
 
         // --- SocketIO Connection ---
         const socket = io('http://127.0.0.1:5000');
-        socket.on('connect', () => {
-            statusDiv.textContent = 'Connected! Starting webcam...';
-            startWebcam();
-            sendHsvUpdate();
-        });
+        socket.on('connect', () => { statusDiv.textContent = 'Connected! Starting webcam...'; startWebcam(); sendHsvUpdate(); });
         socket.on('disconnect', () => { statusDiv.textContent = 'Disconnected from server.'; });
+        socket.on('response', (data) => { lastTrackedPoint = data.coords; if (data.mask) { maskImage.src = 'data:image/jpeg;base64,' + data.mask; } });
+        maskImage.onload = () => { maskCtx.drawImage(maskImage, 0, 0, maskCanvas.width, maskCanvas.height); };
 
-        // --- UPDATED: Listen for the 'response' object from the server ---
-        socket.on('response', (data) => {
-            // Update the tracked point using the 'coords' key
-            lastTrackedPoint = data.coords;
-
-            // NEW: Check for the 'mask' key and update the image source
-            if (data.mask) {
-                maskImage.src = 'data:image/jpeg;base64,' + data.mask;
-            }
-        });
-        
-        // NEW: When the mask image has finished loading, draw it to its canvas
-        maskImage.onload = () => {
-            maskCtx.drawImage(maskImage, 0, 0, maskCanvas.width, maskCanvas.height);
-        };
-
+        // --- HSV Slider Logic ---
+        function sendHsvUpdate() { /* ... unchanged ... */ }
+        for (const key in sliders) { sliders[key].addEventListener('input', sendHsvUpdate); }
         function sendHsvUpdate() {
-            const hsv_values = {
-                lh: parseInt(sliders.lh.value), ls: parseInt(sliders.ls.value), lv: parseInt(sliders.lv.value),
-                uh: parseInt(sliders.uh.value), us: parseInt(sliders.us.value), uv: parseInt(sliders.uv.value),
-            };
+            const hsv_values = { lh: parseInt(sliders.lh.value), ls: parseInt(sliders.ls.value), lv: parseInt(sliders.lv.value), uh: parseInt(sliders.uh.value), us: parseInt(sliders.us.value), uv: parseInt(sliders.uv.value), };
             for (const key in hsv_values) { sliderVals[key].textContent = hsv_values[key]; }
             socket.emit('update_hsv', hsv_values);
         }
-        for (const key in sliders) { sliders[key].addEventListener('input', sendHsvUpdate); }
 
+        // --- NEW: Audio Setup for Shot Detection ---
+        function setupAudio() {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+                microphone = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                microphone.connect(analyser);
+            }).catch(err => console.error("Microphone Error:", err));
+        }
+        
+        // --- NEW: Calibration and Centering Logic ---
+        calibrateScaleButton.addEventListener('click', () => {
+            isCalibratingScale = true;
+            calibPoints = [];
+            statusDiv.textContent = "CALIBRATE SCALE: Hold a ruler at the firearm's distance. Click on two points on the ruler in the LIVE FEED.";
+        });
+
+        videoCanvas.addEventListener('click', (event) => {
+            if (!isCalibratingScale) return;
+            const rect = videoCanvas.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            calibPoints.push({x, y});
+            
+            videoCtx.fillStyle = 'lime';
+            videoCtx.beginPath();
+            videoCtx.arc(x, y, 5, 0, 2 * Math.PI);
+            videoCtx.fill();
+
+            if (calibPoints.length === 1) {
+                statusDiv.textContent = "First point set. Now click the second point.";
+            } else {
+                const distInPixels = Math.sqrt(Math.pow(calibPoints[1].x - calibPoints[0].x, 2) + Math.pow(calibPoints[1].y - calibPoints[0].y, 2));
+                const distInMm = parseFloat(prompt("Enter the real-world distance between the two points in MILLIMETERS (e.g., 100 for 10cm):"));
+                if (distInMm > 0) {
+                    pixelsPerMm = distInPixels / distInMm;
+                    statusDiv.textContent = `Scale calibrated: ${pixelsPerMm.toFixed(2)} pixels/mm. You can now set your aim center.`;
+                    setCenterButton.disabled = false;
+                } else {
+                    statusDiv.textContent = "Invalid distance. Please try calibration again.";
+                }
+                isCalibratingScale = false;
+            }
+        });
+
+        setCenterButton.addEventListener('click', () => {
+            if (lastTrackedPoint) {
+                centerPoint = lastTrackedPoint;
+                statusDiv.textContent = `Aim center set at (${centerPoint.x}, ${centerPoint.y}). Ready to train.`;
+                targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+                drawTargetRings();
+            } else {
+                statusDiv.textContent = "Could not set center. Make sure sticker is visible.";
+            }
+        });
+
+        // --- NEW: Target Drawing Logic ---
+        function drawTargetRings() {
+            targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+            const centerX = targetCanvas.width / 2;
+            const centerY = targetCanvas.height / 2;
+            const rings = 10;
+            for (let i = rings; i > 0; i--) {
+                targetCtx.beginPath();
+                targetCtx.arc(centerX, centerY, (i / rings) * (targetCanvas.width / 2), 0, 2 * Math.PI);
+                targetCtx.strokeStyle = (i % 2 === 0) ? '#aaa' : '#ccc';
+                targetCtx.lineWidth = 1;
+                targetCtx.stroke();
+            }
+            targetCtx.beginPath();
+            targetCtx.arc(centerX, centerY, 2, 0, 2 * Math.PI);
+            targetCtx.fillStyle = 'black';
+            targetCtx.fill();
+        }
+
+        function drawTrace() {
+            if (traceHistory.length < 2) return;
+            targetCtx.lineWidth = 2;
+            for (let i = 1; i < traceHistory.length; i++) {
+                const p1 = traceHistory[i-1];
+                const p2 = traceHistory[i];
+                 // Gradient from blue (old) to green (recent)
+                const ratio = i / traceHistory.length;
+                targetCtx.strokeStyle = `rgb(0, ${150 + ratio * 105}, ${255 - ratio * 150})`;
+                targetCtx.beginPath();
+                targetCtx.moveTo(p1.x, p1.y);
+                targetCtx.lineTo(p2.x, p2.y);
+                targetCtx.stroke();
+            }
+            // Mark the shot point in red
+            const shotPoint = traceHistory[traceHistory.length-1];
+            targetCtx.beginPath();
+            targetCtx.arc(shotPoint.x, shotPoint.y, 5, 0, 2*Math.PI);
+            targetCtx.fillStyle = 'red';
+            targetCtx.fill();
+        }
+
+        // --- Main Loop ---
+        function mainLoop() {
+            videoCtx.drawImage(video, 0, 0, videoCanvas.width, videoCanvas.height);
+            // Draw tracking dot on live feed
+            if (lastTrackedPoint) {
+                videoCtx.beginPath();
+                videoCtx.arc(lastTrackedPoint.x, lastTrackedPoint.y, 10, 0, 2 * Math.PI);
+                videoCtx.fillStyle = 'rgba(255, 0, 0, 0.7)';
+                videoCtx.fill();
+            }
+
+            // If calibrated, update the target canvas
+            if (pixelsPerMm && centerPoint && lastTrackedPoint) {
+                // 1. Calculate deviation in pixels
+                const dx_pixels = lastTrackedPoint.x - centerPoint.x;
+                const dy_pixels = lastTrackedPoint.y - centerPoint.y;
+                
+                // 2. Convert to real-world mm at the firearm
+                const dx_mm = dx_pixels / pixelsPerMm;
+                const dy_mm = dy_pixels / pixelsPerMm;
+
+                // 3. Apply magnification
+                const target_dx_mm = dx_mm * MAGNIFICATION;
+                const target_dy_mm = dy_mm * MAGNIFICATION;
+                
+                // 4. Map mm deviation to target canvas pixels
+                const mmToTargetPixelRatio = targetCanvas.width / TARGET_DIAMETER_MM;
+                const target_dx_pixels = target_dx_mm * mmToTargetPixelRatio;
+                const target_dy_pixels = target_dy_mm * mmToTargetPixelRatio;
+
+                // 5. Draw the live aiming dot
+                const targetCenterX = targetCanvas.width / 2;
+                const targetCenterY = targetCanvas.height / 2;
+                const aimX = targetCenterX + target_dx_pixels;
+                const aimY = targetCenterY + target_dy_pixels;
+
+                drawTargetRings(); // Redraw rings to clear old dot
+                
+                targetCtx.beginPath();
+                targetCtx.arc(aimX, aimY, 5, 0, 2 * Math.PI);
+                targetCtx.fillStyle = 'blue';
+                targetCtx.fill();
+
+                // Store point for trace history
+                traceHistory.push({x: aimX, y: aimY, time: Date.now()});
+            }
+
+            // Keep history to last ~3 seconds
+            const historyCutoff = Date.now() - 3000;
+            traceHistory = traceHistory.filter(p => p.time > historyCutoff);
+
+            // Detect shot
+            detectShot();
+
+            // Send image to backend
+            const imageData = videoCanvas.toDataURL('image/jpeg', 0.7);
+            socket.emit('image', imageData);
+        }
+
+        function detectShot() {
+            if (!analyser) return;
+            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for(const amplitude of dataArray) { sum += amplitude * amplitude; }
+            const currentVolume = Math.sqrt(sum / dataArray.length) / 100;
+            const SHOT_DEBOUNCE = 2000;
+            
+            if (currentVolume > 0.05 && (Date.now() - lastShotTime > SHOT_DEBOUNCE)) {
+                lastShotTime = Date.now();
+                console.log("Shot Detected!");
+                statusDiv.textContent = `Shot detected at ${new Date().toLocaleTimeString()}`;
+                drawTrace(); // Draw the final trace
+                traceHistory = []; // Clear history for next shot
+            }
+        }
+
+        // --- Startup ---
         async function startWebcam() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 video.srcObject = stream;
+                setupAudio(); // Setup microphone
                 video.onloadedmetadata = () => { setInterval(mainLoop, 40); };
-            } catch (err) {
-                console.error("Webcam Error:", err);
-                statusDiv.textContent = "Error: Could not access webcam.";
-            }
-        }
-
-        function mainLoop() {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            if (lastTrackedPoint) {
-                ctx.beginPath();
-                ctx.arc(lastTrackedPoint.x, lastTrackedPoint.y, 10, 0, 2 * Math.PI);
-                ctx.fillStyle = 'red';
-                ctx.fill();
-            }
-            const imageData = canvas.toDataURL('image/jpeg', 0.7);
-            socket.emit('image', imageData);
+                drawTargetRings();
+            } catch (err) { console.error("Webcam Error:", err); statusDiv.textContent = "Error: Could not access webcam."; }
         }
     </script>
 </body>
