@@ -1,0 +1,128 @@
+<!-- index.html (UPDATED for Mask Streaming) -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Live Vision Trainer</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background-color: #2c3e50; color: white; margin: 0; padding: 20px; box-sizing: border-box; }
+        #main-container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; align-items: flex-start; }
+        .video-box { background-color: #000; border-radius: 8px; }
+        #video { display: none; }
+        #controls { background-color: #34495e; padding: 20px; border-radius: 8px; width: 300px; }
+        .slider-group { margin-bottom: 10px; }
+        .slider-group label { display: block; margin-bottom: 5px; }
+        input[type="range"] { width: 100%; }
+        h3 { margin-top: 0; }
+    </style>
+</head>
+<body>
+    <h1>Live Vision Trainer</h1>
+    <div id="status" style="margin-bottom: 20px;">Connecting to server...</div>
+    
+    <div id="main-container">
+        <div>
+            <h3>Live Feed</h3>
+            <canvas id="videoCanvas" class="video-box" width="640" height="480"></canvas>
+            <video id="video" width="640" height="480" autoplay></video>
+        </div>
+
+        <div id="controls">
+            <h3>HSV Calibration</h3>
+            <!-- Sliders are unchanged -->
+            <div class="slider-group"><label for="lh">Lower Hue (L-H): <span id="lh-val">5</span></label><input type="range" id="lh" min="0" max="179" value="5"></div>
+            <div class="slider-group"><label for="ls">Lower Saturation (L-S): <span id="ls-val">150</span></label><input type="range" id="ls" min="0" max="255" value="150"></div>
+            <div class="slider-group"><label for="lv">Lower Value (L-V): <span id="lv-val">150</span></label><input type="range" id="lv" min="0" max="255" value="150"></div>
+            <hr style="border-color: #555; margin: 20px 0;">
+            <div class="slider-group"><label for="uh">Upper Hue (U-H): <span id="uh-val">15</span></label><input type="range" id="uh" min="0" max="179" value="15"></div>
+            <div class="slider-group"><label for="us">Upper Saturation (U-S): <span id="us-val">255</span></label><input type="range" id="us" min="0" max="255" value="255"></div>
+            <div class="slider-group"><label for="uv">Upper Value (U-V): <span id="uv-val">255</span></label><input type="range" id="uv" min="0" max="255" value="255"></div>
+        </div>
+        
+        <!-- NEW: Canvas to display the mask -->
+        <div>
+            <h3>Live Mask</h3>
+            <canvas id="maskCanvas" class="video-box" width="320" height="240"></canvas>
+        </div>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+    <script>
+        // --- Setup ---
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('videoCanvas');
+        const ctx = canvas.getContext('2d');
+        const statusDiv = document.getElementById('status');
+        
+        // NEW: Setup for the mask display
+        const maskCanvas = document.getElementById('maskCanvas');
+        const maskCtx = maskCanvas.getContext('2d');
+        const maskImage = new Image();
+
+        let lastTrackedPoint = null;
+
+        // Setup for sliders (unchanged)
+        const sliders = { lh: document.getElementById('lh'), ls: document.getElementById('ls'), lv: document.getElementById('lv'), uh: document.getElementById('uh'), us: document.getElementById('us'), uv: document.getElementById('uv'), };
+        const sliderVals = { lh: document.getElementById('lh-val'), ls: document.getElementById('ls-val'), lv: document.getElementById('lv-val'), uh: document.getElementById('uh-val'), us: document.getElementById('us-val'), uv: document.getElementById('uv-val'), };
+
+        // --- SocketIO Connection ---
+        const socket = io('http://127.0.0.1:5000');
+        socket.on('connect', () => {
+            statusDiv.textContent = 'Connected! Starting webcam...';
+            startWebcam();
+            sendHsvUpdate();
+        });
+        socket.on('disconnect', () => { statusDiv.textContent = 'Disconnected from server.'; });
+
+        // --- UPDATED: Listen for the 'response' object from the server ---
+        socket.on('response', (data) => {
+            // Update the tracked point using the 'coords' key
+            lastTrackedPoint = data.coords;
+
+            // NEW: Check for the 'mask' key and update the image source
+            if (data.mask) {
+                maskImage.src = 'data:image/jpeg;base64,' + data.mask;
+            }
+        });
+        
+        // NEW: When the mask image has finished loading, draw it to its canvas
+        maskImage.onload = () => {
+            maskCtx.drawImage(maskImage, 0, 0, maskCanvas.width, maskCanvas.height);
+        };
+
+        function sendHsvUpdate() {
+            const hsv_values = {
+                lh: parseInt(sliders.lh.value), ls: parseInt(sliders.ls.value), lv: parseInt(sliders.lv.value),
+                uh: parseInt(sliders.uh.value), us: parseInt(sliders.us.value), uv: parseInt(sliders.uv.value),
+            };
+            for (const key in hsv_values) { sliderVals[key].textContent = hsv_values[key]; }
+            socket.emit('update_hsv', hsv_values);
+        }
+        for (const key in sliders) { sliders[key].addEventListener('input', sendHsvUpdate); }
+
+        async function startWebcam() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => { setInterval(mainLoop, 40); };
+            } catch (err) {
+                console.error("Webcam Error:", err);
+                statusDiv.textContent = "Error: Could not access webcam.";
+            }
+        }
+
+        function mainLoop() {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            if (lastTrackedPoint) {
+                ctx.beginPath();
+                ctx.arc(lastTrackedPoint.x, lastTrackedPoint.y, 10, 0, 2 * Math.PI);
+                ctx.fillStyle = 'red';
+                ctx.fill();
+            }
+            const imageData = canvas.toDataURL('image/jpeg', 0.7);
+            socket.emit('image', imageData);
+        }
+    </script>
+</body>
+</html>
