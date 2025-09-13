@@ -1,4 +1,4 @@
-<!-- index.html (FINAL VERSION with Target Simulation) -->
+<!-- index.html (UPDATED with Manual Trace Controls) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -14,8 +14,8 @@
         .slider-group label { display: block; margin-bottom: 5px; }
         input[type="range"] { width: 100%; }
         h3 { margin-top: 0; text-align: center; }
-        button { background-color: #3498db; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; width: 100%; margin-top: 10px; }
-        button:hover { background-color: #2980b9; }
+        button { background-color: #3498db; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; width: 100%; margin-top: 10px; transition: background-color 0.2s; }
+        button:hover:not(:disabled) { background-color: #2980b9; }
         button:disabled { background-color: #555; cursor: not-allowed; }
         #targetCanvas { background-color: #f0f0f0; border: 2px solid #333; cursor: crosshair; }
         #target-container { text-align: center; }
@@ -47,7 +47,6 @@
         <div>
             <div id="controls">
                 <h3>HSV Calibration</h3>
-                <!-- Sliders are unchanged -->
                 <div class="slider-group"><label>L-H: <span id="lh-val">5</span></label><input type="range" id="lh" min="0" max="179" value="5"></div>
                 <div class="slider-group"><label>L-S: <span id="ls-val">150</span></label><input type="range" id="ls" min="0" max="255" value="150"></div>
                 <div class="slider-group"><label>L-V: <span id="lv-val">150</span></label><input type="range" id="lv" min="0" max="255" value="150"></div>
@@ -60,6 +59,10 @@
                  <h3>Actions</h3>
                  <button id="calibrateScaleButton">Calibrate Scale</button>
                  <button id="setCenterButton" disabled>Set Aim Center</button>
+                 <hr style="border-color: #555; margin: 15px 0;">
+                 <!-- NEW: Manual Trace Buttons -->
+                 <button id="startTraceButton" disabled>Start Trace</button>
+                 <button id="stopTraceButton" disabled>Stop Trace</button>
             </div>
         </div>
     </div>
@@ -77,20 +80,23 @@
         const statusDiv = document.getElementById('status');
         const setCenterButton = document.getElementById('setCenterButton');
         const calibrateScaleButton = document.getElementById('calibrateScaleButton');
+        const startTraceButton = document.getElementById('startTraceButton');
+        const stopTraceButton = document.getElementById('stopTraceButton');
 
         // --- State Variables ---
         let lastTrackedPoint = null;
-        let pixelsPerMm = null; // Our crucial calibration ratio
-        let centerPoint = null; // The (x,y) of the sticker when user "zeros" their aim
+        let pixelsPerMm = null;
+        let centerPoint = null;
         let isCalibratingScale = false;
         let calibPoints = [];
-        let traceHistory = []; // Stores magnified points for the trace
-        let audioContext, microphone, analyser;
-        let lastShotTime = 0;
+        let traceHistory = [];
+        let isTracing = false;
+        // NEW: This variable will store the last trace to be displayed persistently.
+        let lastTraceToDisplay = [];
 
         // --- Constants ---
-        const MAGNIFICATION = 10; // 10m target / 1m camera distance
-        const TARGET_DIAMETER_MM = 200; // Let's say our canvas represents a 20cm diameter on the target
+        const MAGNIFICATION = 10;
+        const TARGET_DIAMETER_MM = 200;
         
         // --- Setup: Sliders & Mask Image ---
         const maskImage = new Image();
@@ -105,26 +111,14 @@
         maskImage.onload = () => { maskCtx.drawImage(maskImage, 0, 0, maskCanvas.width, maskCanvas.height); };
 
         // --- HSV Slider Logic ---
-        function sendHsvUpdate() { /* ... unchanged ... */ }
-        for (const key in sliders) { sliders[key].addEventListener('input', sendHsvUpdate); }
         function sendHsvUpdate() {
             const hsv_values = { lh: parseInt(sliders.lh.value), ls: parseInt(sliders.ls.value), lv: parseInt(sliders.lv.value), uh: parseInt(sliders.uh.value), us: parseInt(sliders.us.value), uv: parseInt(sliders.uv.value), };
             for (const key in hsv_values) { sliderVals[key].textContent = hsv_values[key]; }
             socket.emit('update_hsv', hsv_values);
         }
-
-        // --- NEW: Audio Setup for Shot Detection ---
-        function setupAudio() {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-                microphone = audioContext.createMediaStreamSource(stream);
-                analyser = audioContext.createAnalyser();
-                analyser.fftSize = 256;
-                microphone.connect(analyser);
-            }).catch(err => console.error("Microphone Error:", err));
-        }
+        for (const key in sliders) { sliders[key].addEventListener('input', sendHsvUpdate); }
         
-        // --- NEW: Calibration and Centering Logic ---
+        // --- Calibration and Centering Logic ---
         calibrateScaleButton.addEventListener('click', () => {
             isCalibratingScale = true;
             calibPoints = [];
@@ -165,12 +159,33 @@
                 statusDiv.textContent = `Aim center set at (${centerPoint.x}, ${centerPoint.y}). Ready to train.`;
                 targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
                 drawTargetRings();
+                startTraceButton.disabled = false;
             } else {
                 statusDiv.textContent = "Could not set center. Make sure sticker is visible.";
             }
         });
 
-        // --- NEW: Target Drawing Logic ---
+        // --- Manual Trace Button Listeners ---
+        startTraceButton.addEventListener('click', () => {
+            isTracing = true;
+            traceHistory = [];
+            lastTraceToDisplay = []; // MODIFIED: Clear the persistent trace.
+            drawTargetRings(); 
+            statusDiv.textContent = 'Tracing started...';
+            startTraceButton.disabled = true;
+            stopTraceButton.disabled = false;
+        });
+
+        stopTraceButton.addEventListener('click', () => {
+            isTracing = false;
+            drawTrace(traceHistory); // MODIFIED: Draw the trace immediately.
+            lastTraceToDisplay = [...traceHistory]; // MODIFIED: Save a copy of the trace to display persistently.
+            statusDiv.textContent = 'Trace complete. Ready to start new trace.';
+            startTraceButton.disabled = false;
+            stopTraceButton.disabled = true;
+        });
+
+        // --- Target Drawing Logic ---
         function drawTargetRings() {
             targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
             const centerX = targetCanvas.width / 2;
@@ -189,24 +204,23 @@
             targetCtx.fill();
         }
 
-        function drawTrace() {
-            if (traceHistory.length < 2) return;
+        // MODIFIED: This function now takes the data to draw as an argument.
+        function drawTrace(history) {
+            if (history.length < 2) return;
             targetCtx.lineWidth = 2;
-            for (let i = 1; i < traceHistory.length; i++) {
-                const p1 = traceHistory[i-1];
-                const p2 = traceHistory[i];
-                 // Gradient from blue (old) to green (recent)
-                const ratio = i / traceHistory.length;
-                targetCtx.strokeStyle = `rgb(0, ${150 + ratio * 105}, ${255 - ratio * 150})`;
+            for (let i = 1; i < history.length; i++) {
+                const p1 = history[i - 1];
+                const p2 = history[i];
+                const ratio = i / history.length;
+                targetCtx.strokeStyle = `rgb(0, ${150 + ratio * 105}, ${255 - ratio * 150})`; // Blue to green gradient
                 targetCtx.beginPath();
                 targetCtx.moveTo(p1.x, p1.y);
                 targetCtx.lineTo(p2.x, p2.y);
                 targetCtx.stroke();
             }
-            // Mark the shot point in red
-            const shotPoint = traceHistory[traceHistory.length-1];
+            const shotPoint = history[history.length - 1];
             targetCtx.beginPath();
-            targetCtx.arc(shotPoint.x, shotPoint.y, 5, 0, 2*Math.PI);
+            targetCtx.arc(shotPoint.x, shotPoint.y, 5, 0, 2 * Math.PI);
             targetCtx.fillStyle = 'red';
             targetCtx.fill();
         }
@@ -214,7 +228,6 @@
         // --- Main Loop ---
         function mainLoop() {
             videoCtx.drawImage(video, 0, 0, videoCanvas.width, videoCanvas.height);
-            // Draw tracking dot on live feed
             if (lastTrackedPoint) {
                 videoCtx.beginPath();
                 videoCtx.arc(lastTrackedPoint.x, lastTrackedPoint.y, 10, 0, 2 * Math.PI);
@@ -222,70 +235,40 @@
                 videoCtx.fill();
             }
 
-            // If calibrated, update the target canvas
             if (pixelsPerMm && centerPoint && lastTrackedPoint) {
-                // 1. Calculate deviation in pixels
-                const dx_pixels = lastTrackedPoint.x - centerPoint.x;
+                const dx_pixels = centerPoint.x - lastTrackedPoint.x;
                 const dy_pixels = lastTrackedPoint.y - centerPoint.y;
-                
-                // 2. Convert to real-world mm at the firearm
                 const dx_mm = dx_pixels / pixelsPerMm;
                 const dy_mm = dy_pixels / pixelsPerMm;
-
-                // 3. Apply magnification
                 const target_dx_mm = dx_mm * MAGNIFICATION;
                 const target_dy_mm = dy_mm * MAGNIFICATION;
-                
-                // 4. Map mm deviation to target canvas pixels
                 const mmToTargetPixelRatio = targetCanvas.width / TARGET_DIAMETER_MM;
                 const target_dx_pixels = target_dx_mm * mmToTargetPixelRatio;
                 const target_dy_pixels = target_dy_mm * mmToTargetPixelRatio;
-
-                // 5. Draw the live aiming dot
                 const targetCenterX = targetCanvas.width / 2;
                 const targetCenterY = targetCanvas.height / 2;
                 const aimX = targetCenterX + target_dx_pixels;
                 const aimY = targetCenterY + target_dy_pixels;
 
-                drawTargetRings(); // Redraw rings to clear old dot
+                drawTargetRings();
+                
+                // NEW: If there's a completed trace and we are NOT currently tracing, redraw it.
+                if (!isTracing && lastTraceToDisplay.length > 0) {
+                    drawTrace(lastTraceToDisplay);
+                }
+                
+                if (isTracing) {
+                    traceHistory.push({ x: aimX, y: aimY, time: Date.now() });
+                }
                 
                 targetCtx.beginPath();
                 targetCtx.arc(aimX, aimY, 5, 0, 2 * Math.PI);
                 targetCtx.fillStyle = 'blue';
                 targetCtx.fill();
-
-                // Store point for trace history
-                traceHistory.push({x: aimX, y: aimY, time: Date.now()});
             }
-
-            // Keep history to last ~3 seconds
-            const historyCutoff = Date.now() - 3000;
-            traceHistory = traceHistory.filter(p => p.time > historyCutoff);
-
-            // Detect shot
-            detectShot();
-
-            // Send image to backend
+            
             const imageData = videoCanvas.toDataURL('image/jpeg', 0.7);
             socket.emit('image', imageData);
-        }
-
-        function detectShot() {
-            if (!analyser) return;
-            const dataArray = new Uint8Array(analyser.frequencyBinCount);
-            analyser.getByteFrequencyData(dataArray);
-            let sum = 0;
-            for(const amplitude of dataArray) { sum += amplitude * amplitude; }
-            const currentVolume = Math.sqrt(sum / dataArray.length) / 100;
-            const SHOT_DEBOUNCE = 2000;
-            
-            if (currentVolume > 0.05 && (Date.now() - lastShotTime > SHOT_DEBOUNCE)) {
-                lastShotTime = Date.now();
-                console.log("Shot Detected!");
-                statusDiv.textContent = `Shot detected at ${new Date().toLocaleTimeString()}`;
-                drawTrace(); // Draw the final trace
-                traceHistory = []; // Clear history for next shot
-            }
         }
 
         // --- Startup ---
@@ -293,7 +276,6 @@
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 video.srcObject = stream;
-                setupAudio(); // Setup microphone
                 video.onloadedmetadata = () => { setInterval(mainLoop, 40); };
                 drawTargetRings();
             } catch (err) { console.error("Webcam Error:", err); statusDiv.textContent = "Error: Could not access webcam."; }
@@ -301,3 +283,4 @@
     </script>
 </body>
 </html>
+

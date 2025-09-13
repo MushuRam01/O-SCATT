@@ -1,4 +1,4 @@
-# server.py (UPDATED for Mask Streaming)
+
 
 import cv2
 import numpy as np
@@ -8,7 +8,7 @@ import base64
 from PIL import Image
 import io
 
-# --- Initialize ---
+# Initialize 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -38,8 +38,8 @@ def handle_hsv_update(data):
 @socketio.on('image')
 def handle_image(data):
     frame = base64_to_cv2_image(data)
-    
-    # --- Analysis Logic (same as before) ---
+
+    # Analysis Logic (same as analysis_headon.py)
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, LOWER_ORANGE, UPPER_ORANGE)
     contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -53,17 +53,17 @@ def handle_image(data):
         if area > 100:
             M = cv2.moments(best_contour)
             if M["m00"] != 0:
-                cX = int(M["m10"] / M["m00"])
-                cY = int(M["m01"] / M["m00"])
+                cX = (M["m10"] / M["m00"])  #keeping it as float for more precision
+                cY = (M["m01"] / M["m00"])
                 found_coords = {'x': cX, 'y': cY}
 
-    # --- NEW: Encode the mask to send to the frontend ---
+    # Encode the mask to send to the frontend 
     # 1. Encode the mask image as a JPEG in memory
     _, buffer = cv2.imencode('.jpg', mask)
     # 2. Convert the buffered image to a Base64 string
     mask_base64 = base64.b64encode(buffer).decode('utf-8')
 
-    # --- Send BOTH the coordinates and the mask back ---
+    # Send BOTH the coordinates and the mask back
     # The response is now a dictionary
     emit('response', {'coords': found_coords, 'mask': mask_base64})
 
